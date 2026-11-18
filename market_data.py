@@ -31,6 +31,7 @@ class PriceDecision:
     ask: str
     spread: str
     spread_multiplier: str
+    epsilon: str
     spread_adjustment: str
     offset: str
     source: str
@@ -261,15 +262,16 @@ def resolve_dynamic_price(
             f"invalid negative spread: ask {quote.ask} - bid {quote.bid} = {spread}"
         )
 
-    spread_distance = spread * Decimal(spread_multiplier)
-    spread_adjustment = (
-        -spread_distance if order_side.lower() == "buy" else spread_distance
+    epsilon = spread * Decimal(spread_multiplier)
+    side_adjustment = (
+        -epsilon if order_side.lower() == "buy" else epsilon
     )
-    calculated = Decimal(reference) + Decimal(price_offset) + spread_adjustment
+    calculated = Decimal(reference) + side_adjustment + Decimal(price_offset)
     if not calculated.is_finite() or calculated <= 0:
         raise MarketDataError(
             "calculated order price must be positive; "
-            f"got {reference} + {price_offset} + {spread_adjustment}"
+            f"got reference {reference} + side adjustment {side_adjustment} "
+            f"+ offset {price_offset}"
         )
     return PriceDecision(
         price=format(calculated, "f"),
@@ -279,7 +281,8 @@ def resolve_dynamic_price(
         ask=quote.ask,
         spread=format(spread, "f"),
         spread_multiplier=spread_multiplier,
-        spread_adjustment=format(spread_adjustment, "f"),
+        epsilon=format(epsilon, "f"),
+        spread_adjustment=format(side_adjustment, "f"),
         offset=price_offset,
         source=price_mode,
     )

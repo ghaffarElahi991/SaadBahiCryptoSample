@@ -139,7 +139,8 @@ def main() -> None:
             f"price source={decision.source} bid={decision.bid} ask={decision.ask} "
             f"spread={decision.spread} reference={decision.book_side}:"
             f"{decision.reference_price} spread_multiplier={decision.spread_multiplier} "
-            f"spread_adjustment={decision.spread_adjustment} offset={decision.offset} "
+            f"epsilon={decision.epsilon} side_adjustment={decision.spread_adjustment} "
+            f"offset={decision.offset} "
             f"order_price={decision.price}",
             file=sys.stderr,
         )

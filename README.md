@@ -24,6 +24,7 @@ Python command-line tools for placing Spot orders on Binance, OKX, and Crypto.co
 | `okx.py` | Place OKX orders |
 | `crypto_com.py` | Place Crypto.com Exchange orders |
 | `websocket_cache.py` | Stream best bid/ask prices into Redis |
+| `order_stream.py` | Stream private order/fill updates and measure fill time |
 | `market_data.py` | Shared REST, Redis, and price-calculation logic |
 | `binance_orders.py` | Read Binance orders and balances |
 | `.env` | API credentials and Redis URL |
@@ -126,14 +127,17 @@ The default maximum cached-price age is two seconds. Change it when needed:
 
 ## Ask, bid, price offsets, and spread multipliers
 
-The calculated order price is:
+The spread distance, called `epsilon`, is:
 
 ```text
-BUY  = selected ask or bid + price offset - (spread × spread multiplier)
-SELL = selected ask or bid + price offset + (spread × spread multiplier)
-
 spread = ask - bid
+epsilon = spread multiplier × spread
+
+BUY  = reference price - epsilon
+SELL = reference price + epsilon
 ```
+
+`--price-offset` is an optional final signed adjustment. Its default is zero, so the formulas above are used exactly unless a non-zero offset is supplied.
 
 - Buys default to the bid.
 - Sells default to the ask.
@@ -226,6 +230,89 @@ market:quote:<exchange>:<instrument>
 ```
 
 The collector expires its key after 30 seconds without an update. The order scripts reject data older than two seconds by default.
+
+## Live order and fill stream
+
+Start the private order stream **before** placing an order. It prints every accepted, partially filled, filled, canceled, expired, or rejected order update as normalized JSON.
+
+### Binance order stream
+
+```bash
+python order_stream.py binance SOLUSDT
+```
+
+Monitor all Binance symbols:
+
+```bash
+python order_stream.py binance
+```
+
+### OKX order stream
+
+```bash
+python order_stream.py okx SOL-USDT
+```
+
+For OKX Demo Trading:
+
+```bash
+python order_stream.py okx SOL-USDT --demo
+```
+
+### Crypto.com order stream
+
+```bash
+python order_stream.py crypto_com SOL_USDT
+```
+
+### Save order events
+
+Add `--log-file` to save normalized events as JSON Lines while still printing them:
+
+```bash
+python order_stream.py binance SOLUSDT \
+  --log-file order_events_binance.jsonl
+```
+
+Use `--raw` to also print the original recognized exchange event to standard error:
+
+```bash
+python order_stream.py binance SOLUSDT --raw
+```
+
+Important timing fields in each normalized `order_update` event:
+
+| Field | Meaning |
+| --- | --- |
+| `created_at_ms` | Exchange order creation timestamp |
+| `filled_at_ms` | Exchange fill timestamp when provided |
+| `updated_at_ms` | Exchange order update timestamp |
+| `exchange_elapsed_ms` | Exchange update/fill time minus creation time |
+| `fill_elapsed_ms` | Creation-to-fill time; set on the final `FILLED` event |
+| `stream_observed_elapsed_ms` | Local time between the first and current stream events |
+
+Fill details include order ID, client order ID, symbol, side, order type, status, requested quantity, cumulative filled quantity, last and average fill price, fees, fee asset, trade ID, and maker/taker role when supplied by the exchange. Crypto.com `ACTIVE` updates with a positive cumulative quantity are normalized to `PARTIALLY_FILLED`; the original value remains in `exchange_status`.
+
+Example workflow using three terminals:
+
+```bash
+# Terminal 1: public prices into Redis
+python websocket_cache.py binance SOLUSDT --print-updates
+
+# Terminal 2: private order/fill events
+python order_stream.py binance SOLUSDT \
+  --log-file order_events_binance.jsonl
+
+# Terminal 3: submit the order
+python binance.py SOLUSDT SELL 0.1 \
+  --post-only \
+  --price-mode websocket \
+  --book-side ask \
+  --spread-multiplier 2 \
+  --price-offset 0
+```
+
+The private stream does not place, cancel, or modify orders. Start it before order submission because Binance and OKX private order channels do not send a historical snapshot.
 
 ## Binance commands
 
@@ -411,7 +498,7 @@ Additional Crypto.com options include:
 Every order script prints client-side request latency:
 
 ```text
-price source=websocket bid=64699.10 ask=64699.11 spread=0.01 reference=ask:64699.11 spread_multiplier=2 spread_adjustment=0.02 offset=0 order_price=64699.13
+price source=websocket bid=64699.10 ask=64699.11 spread=0.01 reference=ask:64699.11 spread_multiplier=2 epsilon=0.02 side_adjustment=0.02 offset=0 order_price=64699.13
 order_latency_ms=362.307
 {}
 ```
@@ -425,6 +512,7 @@ python binance.py --help
 python okx.py --help
 python crypto_com.py --help
 python websocket_cache.py --help
+python order_stream.py --help
 python binance_orders.py --help
 ```
 
