@@ -10,6 +10,7 @@ Python command-line tools for placing Spot orders on Binance, OKX, and Crypto.co
 - Post-only/maker-only orders on all three exchanges
 - Fixed, REST, and Redis-backed WebSocket pricing
 - Selectable ask or bid reference with a signed price offset
+- Automatic spread calculation with a configurable spread multiplier
 - Order request latency printed in milliseconds
 - Automatic rejection of stale WebSocket prices
 - Binance order status, open-order, history, and balance queries
@@ -123,12 +124,15 @@ The default maximum cached-price age is two seconds. Change it when needed:
 --max-price-age 5
 ```
 
-## Ask, bid, and price offsets
+## Ask, bid, price offsets, and spread multipliers
 
 The calculated order price is:
 
 ```text
-selected ask or bid + price offset
+BUY  = selected ask or bid + price offset - (spread × spread multiplier)
+SELL = selected ask or bid + price offset + (spread × spread multiplier)
+
+spread = ask - bid
 ```
 
 - Buys default to the bid.
@@ -136,6 +140,9 @@ selected ask or bid + price offset
 - `--book-side bid` or `--book-side ask` overrides the default.
 - A positive offset increases the price.
 - A negative offset decreases the price.
+- `--spread-multiplier 2` moves the order two spreads away from the market.
+- Buys move downward by the multiplied spread.
+- Sells move upward by the multiplied spread.
 
 Examples:
 
@@ -145,6 +152,12 @@ Examples:
 
 # Subtract 0.10 from the ask
 --book-side ask --price-offset=-0.10
+
+# Buy at bid minus two spreads
+--book-side bid --spread-multiplier 2
+
+# Sell at ask plus three spreads
+--book-side ask --spread-multiplier 3
 ```
 
 A post-only order that would immediately trade as a taker can be rejected or canceled by the exchange.
@@ -248,6 +261,7 @@ python binance.py BTCUSDT SELL 0.00019 \
   --post-only \
   --price-mode websocket \
   --book-side ask \
+  --spread-multiplier 2 \
   --price-offset 0 \
   --test-order
 ```
@@ -317,6 +331,7 @@ python okx.py BTC-USDT sell 0.0002 \
   --post-only \
   --price-mode websocket \
   --book-side ask \
+  --spread-multiplier 2 \
   --price-offset 0
 ```
 
@@ -371,6 +386,7 @@ python crypto_com.py BTC_USDT SELL 0.0002 \
   --post-only \
   --price-mode websocket \
   --book-side ask \
+  --spread-multiplier 2 \
   --price-offset 0
 ```
 
@@ -395,7 +411,7 @@ Additional Crypto.com options include:
 Every order script prints client-side request latency:
 
 ```text
-price source=websocket bid=64699.10000000 offset=0 order_price=64699.10000000
+price source=websocket bid=64699.10 ask=64699.11 spread=0.01 reference=ask:64699.11 spread_multiplier=2 spread_adjustment=0.02 offset=0 order_price=64699.13
 order_latency_ms=362.307
 {}
 ```

@@ -122,6 +122,7 @@ def main() -> None:
                 price_mode=args.price_mode,
                 book_side=args.book_side,
                 price_offset=args.price_offset,
+                spread_multiplier=args.spread_multiplier,
                 base_url=base_url,
                 redis_url=os.getenv("REDIS_URL", DEFAULT_REDIS_URL),
                 max_price_age=args.max_price_age,
@@ -131,8 +132,11 @@ def main() -> None:
             raise SystemExit(f"Cannot calculate OKX order price: {exc}") from exc
         order_price = decision.price
         print(
-            f"price source={decision.source} {decision.book_side}={decision.reference_price} "
-            f"offset={decision.offset} order_price={decision.price}",
+            f"price source={decision.source} bid={decision.bid} ask={decision.ask} "
+            f"spread={decision.spread} reference={decision.book_side}:"
+            f"{decision.reference_price} spread_multiplier={decision.spread_multiplier} "
+            f"spread_adjustment={decision.spread_adjustment} offset={decision.offset} "
+            f"order_price={decision.price}",
             file=sys.stderr,
         )
 

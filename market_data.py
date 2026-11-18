@@ -27,6 +27,11 @@ class PriceDecision:
     price: str
     reference_price: str
     book_side: str
+    bid: str
+    ask: str
+    spread: str
+    spread_multiplier: str
+    spread_adjustment: str
     offset: str
     source: str
 
@@ -48,6 +53,14 @@ def add_dynamic_price_arguments(parser: Any) -> None:
         help="Signed amount added to the reference price, for example 0.10 or -0.10",
     )
     parser.add_argument(
+        "--spread-multiplier",
+        default="0",
+        help=(
+            "Move buys down or sells up by spread times this non-negative number "
+            "(default: 0)"
+        ),
+    )
+    parser.add_argument(
         "--max-price-age",
         type=float,
         default=2.0,
@@ -62,6 +75,12 @@ def validate_price_arguments(parser: Any, args: Any, requires_price: bool) -> No
         parser.error("--price-offset must be a valid decimal number")
     if not offset.is_finite():
         parser.error("--price-offset must be finite")
+    try:
+        spread_multiplier = Decimal(args.spread_multiplier)
+    except InvalidOperation:
+        parser.error("--spread-multiplier must be a valid decimal number")
+    if not spread_multiplier.is_finite() or spread_multiplier < 0:
+        parser.error("--spread-multiplier must be finite and non-negative")
     if args.max_price_age <= 0:
         parser.error("--max-price-age must be greater than zero")
 
@@ -77,6 +96,8 @@ def validate_price_arguments(parser: Any, args: Any, requires_price: bool) -> No
         parser.error("--book-side requires --price-mode")
     if not args.price_mode and offset != 0:
         parser.error("--price-offset requires --price-mode")
+    if not args.price_mode and spread_multiplier != 0:
+        parser.error("--spread-multiplier requires --price-mode")
 
 
 def quote_cache_key(exchange: str, instrument: str) -> str:
@@ -211,6 +232,7 @@ def resolve_dynamic_price(
     price_mode: str,
     book_side: str | None,
     price_offset: str,
+    spread_multiplier: str,
     base_url: str,
     redis_url: str,
     max_price_age: float,
@@ -231,15 +253,33 @@ def resolve_dynamic_price(
 
     selected_side = book_side or ("bid" if order_side.lower() == "buy" else "ask")
     reference = getattr(quote, selected_side)
-    calculated = Decimal(reference) + Decimal(price_offset)
+    bid = Decimal(quote.bid)
+    ask = Decimal(quote.ask)
+    spread = ask - bid
+    if spread < 0:
+        raise MarketDataError(
+            f"invalid negative spread: ask {quote.ask} - bid {quote.bid} = {spread}"
+        )
+
+    spread_distance = spread * Decimal(spread_multiplier)
+    spread_adjustment = (
+        -spread_distance if order_side.lower() == "buy" else spread_distance
+    )
+    calculated = Decimal(reference) + Decimal(price_offset) + spread_adjustment
     if not calculated.is_finite() or calculated <= 0:
         raise MarketDataError(
-            f"calculated order price must be positive; got {reference} + {price_offset}"
+            "calculated order price must be positive; "
+            f"got {reference} + {price_offset} + {spread_adjustment}"
         )
     return PriceDecision(
         price=format(calculated, "f"),
         reference_price=reference,
         book_side=selected_side,
+        bid=quote.bid,
+        ask=quote.ask,
+        spread=format(spread, "f"),
+        spread_multiplier=spread_multiplier,
+        spread_adjustment=format(spread_adjustment, "f"),
         offset=price_offset,
         source=price_mode,
     )
