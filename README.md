@@ -1,12 +1,13 @@
 # Multi-Exchange Post-Only Order Scripts
 
-Python command-line tools for placing Spot orders on Binance, OKX, and Crypto.com. Orders can use a fixed price, fetch the latest bid/ask over REST, or read continuously updated WebSocket prices from Redis.
+Python command-line tools for placing Spot orders on Binance, OKX, and Crypto.com, plus Binance Cross Margin orders. Orders can use a fixed price, fetch the latest bid/ask over REST, or read continuously updated WebSocket prices from Redis.
 
-> **Warning:** Commands without `--test-order` or `--demo` can place real orders and use real funds. Confirm the symbol, side, quantity, price source, and account balance before running them.
+> **Warning:** Commands without `--test-order` or `--demo` can place real orders and use real funds. Margin trading can create debt, accrue interest, and cause liquidation. Confirm the account type, symbol, side, quantity, price source, borrowing behavior, and balance before running an order.
 
 ## Features
 
 - Binance, OKX, and Crypto.com authenticated order submission
+- Binance Spot and Cross Margin account selection
 - Post-only/maker-only orders on all three exchanges
 - Fixed, REST, and Redis-backed WebSocket pricing
 - Selectable ask or bid reference with a signed price offset
@@ -241,6 +242,14 @@ Start the private order stream **before** placing an order. It prints every acce
 python order_stream.py binance SOLUSDT
 ```
 
+Monitor Binance Cross Margin orders:
+
+```bash
+python order_stream.py binance SOLUSDT \
+  --account-type cross-margin \
+  --log-file order_events_binance_margin.jsonl
+```
+
 Monitor all Binance symbols:
 
 ```bash
@@ -315,6 +324,61 @@ python binance.py SOLUSDT SELL 0.1 \
 The private stream does not place, cancel, or modify orders. Start it before order submission because Binance and OKX private order channels do not send a historical snapshot.
 
 ## Binance commands
+
+### Binance Cross Margin
+
+Cross Margin is opt-in. Add `--account-type cross-margin` to use `/sapi/v1/margin/order`; without it, `binance.py` continues to use the Spot account.
+
+The API key must have **Enable Spot & Margin Trading** permission, and the Binance Cross Margin account must already be activated. Withdrawal permission is not needed.
+
+Check the complete account, including margin level and total liabilities:
+
+```bash
+python binance_orders.py --account-type cross-margin account
+```
+
+Check one Cross Margin asset:
+
+```bash
+python binance_orders.py --account-type cross-margin balance SOL
+```
+
+Start the private Cross Margin order stream in another terminal:
+
+```bash
+python order_stream.py binance SOLUSDT \
+  --account-type cross-margin \
+  --log-file order_events_binance_margin.jsonl
+```
+
+Submit a post-only Cross Margin sell without automatic borrowing:
+
+```bash
+python binance.py SOLUSDT SELL 0.1 \
+  --account-type cross-margin \
+  --side-effect-type NO_SIDE_EFFECT \
+  --post-only \
+  --price-mode websocket \
+  --book-side ask \
+  --spread-multiplier 2 \
+  --price-offset 0
+```
+
+`NO_SIDE_EFFECT` is the safe default: the order only uses funds already available in the Cross Margin account. To explicitly allow Binance to borrow and repay automatically, use:
+
+```bash
+--side-effect-type AUTO_BORROW_REPAY --auto-repay-at-cancel true
+```
+
+This can create debt and interest exposure. Binance does not provide a Cross Margin equivalent of `/api/v3/order/test`, so `--test-order` is intentionally rejected with `--account-type cross-margin`.
+
+Read Cross Margin orders:
+
+```bash
+python binance_orders.py --account-type cross-margin open SOLUSDT
+python binance_orders.py --account-type cross-margin status SOLUSDT ORDER_ID
+python binance_orders.py --account-type cross-margin history SOLUSDT --limit 20
+```
 
 ### Test a post-only buy using REST
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read Binance Spot orders and balances without changing account state."""
+"""Read Binance Spot or Cross Margin orders and balances."""
 
 import argparse
 import hashlib
@@ -28,7 +28,16 @@ def required_env(name: str) -> str:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="View Binance Spot order status, open orders, history, and balances"
+        description=(
+            "View Binance Spot or Cross Margin order status, open orders, "
+            "history, and balances"
+        )
+    )
+    parser.add_argument(
+        "--account-type",
+        choices=("spot", "cross-margin"),
+        default="spot",
+        help="Account to query (default: spot)",
     )
     parser.add_argument(
         "--recv-window",
@@ -62,6 +71,8 @@ def parse_args() -> argparse.Namespace:
 
     balance = commands.add_parser("balance", help="Show one asset balance")
     balance.add_argument("asset", nargs="?", default="BTC", help="Asset (default: BTC)")
+
+    commands.add_parser("account", help="Show complete account details")
 
     args = parser.parse_args()
     if not 1 <= args.recv_window <= 60000:
@@ -122,17 +133,28 @@ def main() -> None:
     secret_key = required_env("BINANCE_API_SECRET")
     base_url = os.getenv("BINANCE_BASE_URL", DEFAULT_BASE_URL)
 
+    cross_margin = args.account_type == "cross-margin"
     if args.command == "status":
-        path = "/api/v3/order"
+        path = "/sapi/v1/margin/order" if cross_margin else "/api/v3/order"
         params = {"symbol": args.symbol.upper(), "orderId": args.order_id}
+        if cross_margin:
+            params["isIsolated"] = "FALSE"
     elif args.command == "open":
-        path = "/api/v3/openOrders"
+        path = (
+            "/sapi/v1/margin/openOrders" if cross_margin else "/api/v3/openOrders"
+        )
         params = {"symbol": args.symbol.upper()}
+        if cross_margin:
+            params["isIsolated"] = "FALSE"
     elif args.command == "history":
-        path = "/api/v3/allOrders"
+        path = (
+            "/sapi/v1/margin/allOrders" if cross_margin else "/api/v3/allOrders"
+        )
         params = {"symbol": args.symbol.upper(), "limit": args.limit}
+        if cross_margin:
+            params["isIsolated"] = "FALSE"
     else:
-        path = "/api/v3/account"
+        path = "/sapi/v1/margin/account" if cross_margin else "/api/v3/account"
         params = {}
 
     result = signed_get(
@@ -147,10 +169,22 @@ def main() -> None:
 
     if args.command == "balance":
         asset = args.asset.upper()
-        balances = result.get("balances", []) if isinstance(result, dict) else []
+        balance_key = "userAssets" if cross_margin else "balances"
+        balances = result.get(balance_key, []) if isinstance(result, dict) else []
         result = next(
             (item for item in balances if item.get("asset") == asset),
-            {"asset": asset, "free": "0", "locked": "0"},
+            (
+                {
+                    "asset": asset,
+                    "free": "0",
+                    "locked": "0",
+                    "borrowed": "0",
+                    "interest": "0",
+                    "netAsset": "0",
+                }
+                if cross_margin
+                else {"asset": asset, "free": "0", "locked": "0"}
+            ),
         )
     print(json.dumps(result, indent=2))
 

@@ -17,6 +17,7 @@ from urllib.parse import urlencode
 import uuid
 
 from dotenv import load_dotenv
+import requests
 import websocket
 
 
@@ -55,6 +56,12 @@ def parse_args() -> argparse.Namespace:
         help="Optional symbol filter, e.g. SOLUSDT, SOL-USDT, or SOL_USDT",
     )
     parser.add_argument(
+        "--account-type",
+        choices=("spot", "cross-margin"),
+        default="spot",
+        help="Binance account stream to monitor (default: spot)",
+    )
+    parser.add_argument(
         "--demo",
         action="store_true",
         help="Use OKX Demo Trading private WebSocket",
@@ -77,6 +84,8 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     if args.demo and args.exchange != "okx":
         parser.error("--demo is only supported for OKX")
+    if args.account_type != "spot" and args.exchange != "binance":
+        parser.error("--account-type cross-margin is only supported for Binance")
     if args.reconnect_delay < 0:
         parser.error("--reconnect-delay cannot be negative")
     return args
@@ -136,6 +145,7 @@ class OrderStreamMonitor:
     def __init__(self, args: argparse.Namespace) -> None:
         self.exchange = args.exchange
         self.instrument = args.instrument.upper() if args.instrument else None
+        self.account_type = getattr(args, "account_type", "spot")
         self.demo = args.demo
         self.raw = args.raw
         self.reconnect_delay = args.reconnect_delay
@@ -144,6 +154,7 @@ class OrderStreamMonitor:
             lambda: defaultdict(Decimal)
         )
         self.authenticated = False
+        self.margin_token_expiration_ms: int | None = None
         self.log_handle: TextIO | None = (
             open(args.log_file, "a", encoding="utf-8", buffering=1)
             if args.log_file
@@ -210,20 +221,43 @@ class OrderStreamMonitor:
         self.authenticated = False
         print(
             f"connected to {self.exchange} private order stream"
+            + (
+                f" ({self.account_type})"
+                if self.exchange == "binance"
+                else ""
+            )
             + (f" for {self.instrument}" if self.instrument else " for all instruments"),
             file=sys.stderr,
             flush=True,
         )
-        if self.exchange == "binance":
-            self.send_binance_subscription(ws)
-        elif self.exchange == "okx":
-            self.send_okx_login(ws)
-        else:
-            # Crypto.com recommends waiting before the first request after connect.
-            time.sleep(1)
-            self.send_crypto_auth(ws)
+        try:
+            if self.exchange == "binance":
+                self.send_binance_subscription(ws)
+            elif self.exchange == "okx":
+                self.send_okx_login(ws)
+            else:
+                # Crypto.com recommends waiting before the first request after connect.
+                time.sleep(1)
+                self.send_crypto_auth(ws)
+        except RuntimeError as exc:
+            print(f"private stream setup failed: {exc}", file=sys.stderr, flush=True)
+            ws.close()
 
     def send_binance_subscription(self, ws: websocket.WebSocketApp) -> None:
+        if self.account_type == "cross-margin":
+            listen_token = self.create_binance_margin_listen_token()
+            ws.send(
+                json.dumps(
+                    {
+                        "id": str(uuid.uuid4()),
+                        "method": "userDataStream.subscribe.listenToken",
+                        "params": {"listenToken": listen_token},
+                    },
+                    separators=(",", ":"),
+                )
+            )
+            return
+
         params: dict[str, Any] = {
             "apiKey": self.api_key,
             "recvWindow": 5000,
@@ -241,6 +275,54 @@ class OrderStreamMonitor:
                 separators=(",", ":"),
             )
         )
+
+    def create_binance_margin_listen_token(self) -> str:
+        params: dict[str, Any] = {
+            "isIsolated": "false",
+            "validity": 86_400_000,
+            "recvWindow": 5000,
+            "timestamp": int(time.time() * 1000),
+        }
+        payload = urlencode(params, encoding="utf-8")
+        request_body = f"{payload}&signature={hmac_hex(payload, self.secret_key)}"
+        base_url = os.getenv("BINANCE_BASE_URL", "https://api.binance.com").rstrip(
+            "/"
+        )
+        try:
+            response = requests.post(
+                f"{base_url}/sapi/v1/userListenToken",
+                headers={
+                    "X-MBX-APIKEY": self.api_key,
+                    "Content-Type": "application/x-www-form-urlencoded",
+                },
+                data=request_body,
+                timeout=10,
+            )
+        except requests.RequestException as exc:
+            raise RuntimeError(
+                f"could not create Binance Cross Margin listen token: {exc}"
+            ) from exc
+
+        try:
+            result = response.json()
+        except ValueError as exc:
+            raise RuntimeError(
+                "Binance Cross Margin listen-token endpoint returned invalid JSON"
+            ) from exc
+        if not response.ok:
+            code = result.get("code") if isinstance(result, dict) else None
+            message = result.get("msg") if isinstance(result, dict) else None
+            raise RuntimeError(
+                "Binance Cross Margin listen-token request failed "
+                f"(HTTP {response.status_code}, code={code}, message={message})"
+            )
+        token = result.get("token") if isinstance(result, dict) else None
+        if not token:
+            raise RuntimeError(
+                "Binance Cross Margin listen-token response did not contain a token"
+            )
+        self.margin_token_expiration_ms = int_or_none(result.get("expirationTime"))
+        return str(token)
 
     def send_okx_login(self, ws: websocket.WebSocketApp) -> None:
         timestamp = str(time.time())
@@ -337,12 +419,24 @@ class OrderStreamMonitor:
     def handle_binance(self, payload: dict[str, Any]) -> None:
         if "status" in payload and "id" in payload:
             if payload.get("status") != 200:
-                raise RuntimeError(f"Binance subscription failed: {payload}")
+                error = payload.get("error")
+                raise RuntimeError(
+                    "Binance subscription failed "
+                    f"(status={payload.get('status')}, error={error})"
+                )
             self.authenticated = True
-            print("subscribed to Binance user data stream", file=sys.stderr, flush=True)
+            print(
+                f"subscribed to Binance {self.account_type} user data stream",
+                file=sys.stderr,
+                flush=True,
+            )
             return
 
         record = payload.get("event", payload)
+        if record.get("e") == "eventStreamTerminated":
+            raise RuntimeError(
+                f"Binance {self.account_type} user data stream expired"
+            )
         if record.get("e") != "executionReport":
             return
         if self.instrument and record.get("s") != self.instrument:
@@ -365,6 +459,7 @@ class OrderStreamMonitor:
 
         details = {
             "exchange": "binance",
+            "account_type": self.account_type,
             "symbol": record.get("s"),
             "order_id": order_id,
             "client_order_id": record.get("c"),
